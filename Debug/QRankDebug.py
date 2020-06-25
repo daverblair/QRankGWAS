@@ -6,14 +6,27 @@ import pandas as pd
 
 
 if __name__=='__main__':
+    import sys
+    sys.path.append("..")
     from QRankGWAS import QRank
+
+    import matplotlib.pyplot as plt
+    from matplotlib import cm
+    import seaborn as sns
+
+    sns.set(context='talk',color_codes=True,style='ticks',font='Arial',font_scale=1,rc={'axes.linewidth':5,"font.weight":"bold",'axes.labelweight':"bold",'xtick.major.width':4,'xtick.minor.width': 2})
+    cmap = cm.get_cmap('viridis', 12)
+    color_list=[cmap(x) for x in [0.0,0.1,0.25,0.5,0.75,0.9,1.0]]
+    grey_color=(0.5490196078431373, 0.5490196078431373, 0.5490196078431373)
+    red_color = '#b42f2f'
+
     N=100000
 
     intercept=-0.1
-    p=0.05
+    p=0.005
     q=1.0-p
 
-    beta=0.05
+    beta=-0.5
     alpha=np.array([0.7,0.1])
 
     X = np.random.multinomial(1,pvals=[p*p,2.0*p*q,q*q],size=N)
@@ -30,10 +43,13 @@ if __name__=='__main__':
 
     dosage=np.sum(X*np.arange(3),axis=1)
 
+    dosage_df=pd.DataFrame(index=pheno.index)
+    dosage_df['Minor Allele Dosage']=dosage
+
     qrank=QRank(pheno,covariate_matrix=covariates,quantiles=quants)
     qrank.FitNullModels()
     p=qrank.ComputePValues(dosage)
-    # #subset=np.random.choice(np.arange(N),9500,replace=False)
+    betas,ci=qrank.FitAltModels(dosage_df)
     # #
     #
     from rpy2.robjects.packages import importr
@@ -47,3 +63,9 @@ if __name__=='__main__':
 
     print("R Rank P's: {0:g},{1:g},{2:g}".format(*np.array(r_output[1])))
     print("R Composite P: {0:g}".format(np.array(r_output[0][0])))
+
+    print("Quantile Effect Params: {0:g},{1:g},{2:g}".format(*betas))
+    print("Quantile Effects 95CI: ({0:s}),({1:s}),({2:s})".format(*[','.join(list(np.array(x,dtype=np.str))) for x in ci]))
+    fig_data=pd.concat([pheno,dosage_df],axis=1)
+    sns.boxenplot(x='Minor Allele Dosage',y='phenotype',data=fig_data,k_depth='proportion')
+    plt.show()
