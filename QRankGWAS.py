@@ -2,6 +2,7 @@ import numpy as np
 import os
 import pandas as pd
 import statsmodels.api as sm
+from sklearn.utils import shuffle
 from scipy.stats import chi2
 from bgen.reader import BgenFile
 import io
@@ -25,7 +26,8 @@ class QRank:
             assert isinstance(covariate_matrix, pd.DataFrame), "Expects pandas DataFrame object for covariate matrix"
             self.covariate_matrix=covariate_matrix
             if intercept_included==False:
-                self.covariate_matrix['intercept']=np.ones(len(self.covariate_matrix))
+                self.covariate_matrix=self.covariate_matrix.assign(intercept=pd.Series([1]*covariate_matrix.shape[0]).values)
+
         else:
             self.covariate_matrix=pd.DataFrame({'intercept':np.ones(len(self.phenotypes))},index=self.phenotypes.index)
 
@@ -39,14 +41,31 @@ class QRank:
         self.VN=None
 
 
-    def FitNullModels(self,tol=1e-8,maxiter=1000):
+    def FitAltModels(self,dosage_df,tol=1e-8,maxiter=1000,ci_level=0.05):
+        if isinstance(dosage_df, pd.DataFrame) is False:
+            new_df=pd.DataFrame(index=self.phenotypes.index)
+            new_df['rsid_0']=dosage_df
+            dosage_df=new_df
+
+        alt_model=sm.QuantReg(self.phenotypes,pd.concat([self.covariate_matrix,dosage_df],axis=1),hasconst=True)
+        betas=np.zeros(self.quantiles.shape[0])
+        cis=np.zeros((self.quantiles.shape[0],2))
+        for i,q in enumerate(self.quantiles):
+            results=alt_model.fit(q=q,p_tol=tol,max_iter=maxiter)
+            betas[i]=results.params[-1]
+            cis[i]=results.conf_int(alpha=ci_level).loc[dosage_df.columns[0]]
+        return betas,cis
+
+    def FitNullModels(self,tol=1e-8,maxiter=1000,randomize=False):
         self._base_model=sm.QuantReg(self.phenotypes,self.covariate_matrix,hasconst=True)
         for i,q in enumerate(self.quantiles):
             results=self._base_model.fit(q=q,p_tol=tol,max_iter=maxiter)
-
-            self.null_ranks[q]=self._computeNullRanks(q,results.resid)
             self.null_model_results[q]=copy.deepcopy(results)
-
+            self.null_ranks[q]=self._computeNullRanks(q,results.resid)
+        if randomize:
+            rand_index=np.random.permutation(np.arange(self.phenotypes.shape[0]))
+            for i,q in enumerate(self.quantiles):
+                self.null_ranks[q]=self.null_ranks[q][rand_index]
 
         self.VN=np.zeros((self.quantiles.shape[0],self.quantiles.shape[0]))
         for i in range(self.quantiles.shape[0]):
@@ -79,6 +98,12 @@ class QRank:
 class QRankGWAS:
 
     def __init__(self,bgen_file_path,phenotype_file_path,index_column_name,covariate_file_path=None,sample_file_path=None):
+
+        """
+        This software is meant to be called from the command line, so no documentation is included here. Note, the code here is a bit verbose, which was done in an attempt to minimize the number of function calls given the need to perform millions of calls. This could likely be optimized in a better way.
+
+
+        """
         self.index_column_name=index_column_name
 
         assert os.path.isfile(bgen_file_path),"bgen file does not exist"
@@ -117,9 +142,7 @@ class QRankGWAS:
         if included_subjects is None:
             self.included_subjects=self.phenotype_dataset.index.to_numpy()
         else:
-            self.included_subjects=included_subjects
-
-
+            self.included_subjects=np.intersect1d(included_subjects,self.phenotype_dataset.index.to_numpy())
 
         self.Y=self.phenotype_dataset.loc[self.included_subjects][[phenotype_name]]
         if covariate_cols is not None:
@@ -135,320 +158,236 @@ class QRankGWAS:
 
 
 
-    def BuildQRank(self,quantiles,output_file_prefix,param_tol=1e-8, max_fitting_iter=5000):
+    def BuildQRank(self,quantiles,param_tol=1e-8, max_fitting_iter=5000,output_file_prefix=None,randomize=False):
         self.qrank=QRank(self.Y,covariate_matrix=self.Z,quantiles=quantiles)
-        self.qrank.FitNullModels(tol=param_tol,maxiter=max_fitting_iter)
-        for q in quantiles:
-            with open(output_file_prefix+'.NullModel.{0:g}.txt'.format(q),'w') as model_file:
-                model_file.write(self.qrank.null_model_results[q].summary().as_text())
+        self.qrank.FitNullModels(tol=param_tol,maxiter=max_fitting_iter,randomize=randomize)
+        if output_file_prefix is not None:
+            residual_table=pd.DataFrame(index=self.included_subjects)
+
+            for q in quantiles:
+                residual_table['q.{0:g}.residuals'.format(q)]=self.qrank.null_model_results[q].resid
+                with open(output_file_prefix+'.NullModelResults.{0:g}.txt'.format(q),'w') as model_file:
+                    model_file.write(self.qrank.null_model_results[q].summary().as_text())
+                    self.qrank.null_model_results[q].save(output_file_prefix+'.NullModel.{0:g}.pth'.format(q))
+            residual_table.to_csv(output_file_prefix+'.NullModelResiduals.txt',sep='\t')
+
 
     def PerformGWASAdditive(self,output_file_prefix,maf_cutoff,print_freq=1000,variant_list=None):
 
-        with open(output_file_prefix+'.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
+        if variant_list is None:
+            total_num_variants=len(self.bgen_dataset)
+            variant_iterator=self.bgen_dataset
+        elif len(variant_list) > 1000:
+            print("Adjusting bgen index to drop excluded variants from the analysis. This may take several minutes up front.")
+            all_rsids=self.bgen_dataset.rsids()
+            rsid_table=pd.DataFrame({'rsid':all_rsids,'bgen_index':np.arange(len(all_rsids))})
+            rsid_table.set_index('rsid',inplace=True,drop=False)
+            rsid_table=rsid_table.drop(np.intersect1d(variant_list,rsid_table.index.to_numpy()))
+            self.bgen_dataset.drop_variants(rsid_table['bgen_index'].to_list())
+
+            total_num_variants=len(self.bgen_dataset)
+            variant_iterator_func=lambda num_var: [(yield self.bgen_dataset[x]) for x in range(num_var)]
+            variant_iterator=variant_iterator_func(total_num_variants)
+        else:
+            # use a custom generator, load in real time
+            variant_iterator_func = lambda v_list: [(yield self.bgen_dataset.with_rsid(x)) for x in v_list]
+            variant_iterator=variant_iterator_func(variant_list)
+
+        with open(output_file_prefix+'.Additive.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
             output_file.write('snpid\trsid\tchrom\tpos\tmaj\tmin\tmaf\t')
             output_file.write('\t'.join(['p.{0:g}'.format(x) for x in self.qrank.quantiles])+'\tp.comp\n')
+
 
             variant_counter=0
             avg_elapsed_time=0.0
             block_counter=0
             start=time.time()
 
-            if variant_list is None:
-                total_num_variants=len(self.bgen_dataset)
-                for variant in self.bgen_dataset:
-                    if len(variant.alleles)==2:
-                        dosage=variant.minor_allele_dosage[self.included_subjects_bgen_idx]
-                        maf=dosage.sum()/(dosage.shape[0]*2.0)
+            for variant in variant_iterator:
+                if len(variant.alleles)==2:
+                    dosage=variant.minor_allele_dosage[self.included_subjects_bgen_idx]
+                    maf=dosage.sum()/(dosage.shape[0]*2.0)
 
-                        if (maf>=maf_cutoff):
-                            if variant.alleles.index(variant.minor_allele)!=1:
-                                alleles=variant.alleles[::-1]
-                            else:
-                                alleles=variant.alleles
-
-
-                            output_file.write('{0:s}'.format(variant.varid))
-                            output_file.write('\t{0:s}'.format(variant.rsid))
-                            output_file.write('\t{0:s}'.format(variant.chrom))
-                            output_file.write('\t{0:d}'.format(variant.pos))
-                            output_file.write('\t{0:s}'.format(alleles[0]))
-                            output_file.write('\t{0:s}'.format(alleles[1]))
-                            output_file.write('\t{0:.8g}'.format(maf))
-                            pvals=self.qrank.ComputePValues(dosage)
-                            for p in pvals[0]:
-                                output_file.write('\t{0:.8g}'.format(p))
-                            output_file.write('\t{0:.8g}'.format(pvals[1]))
-                            output_file.write('\n')
-                    variant_counter+=1
-                    if (variant_counter) % print_freq==0:
-                        end=time.time()
-                        block_counter+=1
-                        elapsed=end-start
-                        print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                        print('Elapsed time {0:.2f} sec'.format(elapsed))
-                        avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                        print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                        start=time.time()
-
-            else:
-                total_num_variants=len(variant_list)
-                failed_list=[]
-                for rsid in variant_list:
-                    try:
-                        variant=self.bgen_dataset.with_rsid(rsid)
-                        if len(variant.alleles)==2:
-                            dosage=variant.minor_allele_dosage[self.included_subjects_bgen_idx]
-                            maf=dosage.sum()/(dosage.shape[0]*2.0)
-
-                            if (maf>=maf_cutoff):
-                                if variant.alleles.index(variant.minor_allele)!=1:
-                                    alleles=variant.alleles[::-1]
-                                else:
-                                    alleles=variant.alleles
-
-
-                                output_file.write('{0:s}'.format(variant.varid))
-                                output_file.write('\t{0:s}'.format(variant.rsid))
-                                output_file.write('\t{0:s}'.format(variant.chrom))
-                                output_file.write('\t{0:d}'.format(variant.pos))
-                                output_file.write('\t{0:s}'.format(alleles[0]))
-                                output_file.write('\t{0:s}'.format(alleles[1]))
-                                output_file.write('\t{0:.8g}'.format(maf))
-                                pvals=self.qrank.ComputePValues(dosage)
-                                for p in pvals[0]:
-                                    output_file.write('\t{0:.8g}'.format(p))
-                                output_file.write('\t{0:.8g}'.format(pvals[1]))
-                                output_file.write('\n')
+                    if (maf>=maf_cutoff):
+                        if (variant.alleles.index(variant.minor_allele)==1) and (maf<=0.5):
+                            alleles=variant.alleles
                         else:
-                            raise ValueError("Variant {0:s} is not biallelic".format(rsid))
-                    except ValueError:
-                        failed_list+=[rsid]
+                            alleles=variant.alleles[::-1]
+                        
 
-                    variant_counter+=1
-                    if (variant_counter) % print_freq==0:
-                        end=time.time()
-                        block_counter+=1
-                        elapsed=end-start
-                        print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                        print('Elapsed time {0:.2f} sec'.format(elapsed))
-                        avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                        print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                        start=time.time()
 
-                print('Failed to process {0:d} variants due to missing ids/not biallelic'.format(len(failed_list)))
-                print('Failed rsids written to {0:s}.FailedSNPs.txt\n'.format(output_file_prefix))
-                with open(output_file_prefix+'.FailedSNPs.txt','w') as failed_file:
-                    failed_file.write('\n'.join(failed_list)+'\n')
+                        output_file.write('{0:s}'.format(variant.varid))
+                        output_file.write('\t{0:s}'.format(variant.rsid))
+                        output_file.write('\t{0:s}'.format(variant.chrom))
+                        output_file.write('\t{0:d}'.format(variant.pos))
+                        output_file.write('\t{0:s}'.format(alleles[0]))
+                        output_file.write('\t{0:s}'.format(alleles[1]))
+                        output_file.write('\t{0:.8g}'.format(maf))
+                        pvals=self.qrank.ComputePValues(dosage)
+                        for p in pvals[0]:
+                            output_file.write('\t{0:.8g}'.format(p))
+                        output_file.write('\t{0:.8g}'.format(pvals[1]))
+                        output_file.write('\n')
+                variant_counter+=1
+                if (variant_counter) % print_freq==0:
+                    end=time.time()
+                    block_counter+=1
+                    elapsed=end-start
+                    print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
+                    print('Elapsed time {0:.2f} sec'.format(elapsed))
+                    avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
+                    print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
+                    start=time.time()
+
 
     def PerformGWASDominant(self,output_file_prefix,maf_cutoff,print_freq=1000,variant_list=None):
 
-        with open(output_file_prefix+'.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
+        if variant_list is None:
+            total_num_variants=len(self.bgen_dataset)
+            variant_iterator=self.bgen_dataset
+        elif len(variant_list) > 1000:
+            print("Adjusting bgen index to drop excluded variants from the analysis. This may take several minutes up front.")
+            all_rsids=self.bgen_dataset.rsids()
+            rsid_table=pd.DataFrame({'rsid':all_rsids,'bgen_index':np.arange(len(all_rsids))})
+            rsid_table.set_index('rsid',inplace=True,drop=False)
+            rsid_table=rsid_table.drop(np.intersect1d(variant_list,rsid_table.index.to_numpy()))
+            self.bgen_dataset.drop_variants(rsid_table['bgen_index'].to_list())
+
+            total_num_variants=len(self.bgen_dataset)
+            variant_iterator_func=lambda num_var: [(yield self.bgen_dataset[x]) for x in range(num_var)]
+            variant_iterator=variant_iterator_func(total_num_variants)
+        else:
+            # use a custom generator, load in real time
+            variant_iterator_func = lambda v_list: [(yield self.bgen_dataset.with_rsid(x)) for x in v_list]
+            variant_iterator=variant_iterator_func(variant_list)
+
+        with open(output_file_prefix+'.Additive.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
             output_file.write('snpid\trsid\tchrom\tpos\tmaj\tmin\tmaf\t')
             output_file.write('\t'.join(['p.{0:g}'.format(x) for x in self.qrank.quantiles])+'\tp.comp\n')
+
 
             variant_counter=0
             avg_elapsed_time=0.0
             block_counter=0
             start=time.time()
 
-            if variant_list is None:
-                total_num_variants=len(self.bgen_dataset)
-                for variant in self.bgen_dataset:
-                    if len(variant.alleles)==2:
-                        probs=variant.probabilities[self.included_subjects_bgen_idx]
-                        dosage=np.sum(probs[:,1:],axis=1)
-                        maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(dosage.shape[0]*2)
+            for variant in variant_iterator:
+                if len(variant.alleles)==2:
+                    probs=variant.probabilities[self.included_subjects_bgen_idx]
+                    maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(probs.shape[0]*2)
 
-                        if (maf>=maf_cutoff):
-                            if variant.alleles.index(variant.minor_allele)!=1:
-                                alleles=variant.alleles[::-1]
-                            else:
-                                alleles=variant.alleles
-
-
-                            output_file.write('{0:s}'.format(variant.varid))
-                            output_file.write('\t{0:s}'.format(variant.rsid))
-                            output_file.write('\t{0:s}'.format(variant.chrom))
-                            output_file.write('\t{0:d}'.format(variant.pos))
-                            output_file.write('\t{0:s}'.format(alleles[0]))
-                            output_file.write('\t{0:s}'.format(alleles[1]))
-                            output_file.write('\t{0:.8g}'.format(maf))
-                            pvals=self.qrank.ComputePValues(dosage)
-                            for p in pvals[0]:
-                                output_file.write('\t{0:.8g}'.format(p))
-                            output_file.write('\t{0:.8g}'.format(pvals[1]))
-                            output_file.write('\n')
-                    variant_counter+=1
-                    if (variant_counter) % print_freq==0:
-                        end=time.time()
-                        block_counter+=1
-                        elapsed=end-start
-                        print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                        print('Elapsed time {0:.2f} sec'.format(elapsed))
-                        avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                        print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                        start=time.time()
-
-            else:
-                total_num_variants=len(variant_list)
-                failed_list=[]
-                for rsid in variant_list:
-                    try:
-                        variant=self.bgen_dataset.with_rsid(rsid)
-                        if len(variant.alleles)==2:
-                            probs=variant.probabilities[self.included_subjects_bgen_idx]
-                            dosage=np.sum(probs[:,1:],axis=1)
-                            maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(dosage.shape[0]*2)
-
-                            if (maf>=maf_cutoff):
-                                if variant.alleles.index(variant.minor_allele)!=1:
-                                    alleles=variant.alleles[::-1]
-                                else:
-                                    alleles=variant.alleles
-
-
-                                output_file.write('{0:s}'.format(variant.varid))
-                                output_file.write('\t{0:s}'.format(variant.rsid))
-                                output_file.write('\t{0:s}'.format(variant.chrom))
-                                output_file.write('\t{0:d}'.format(variant.pos))
-                                output_file.write('\t{0:s}'.format(alleles[0]))
-                                output_file.write('\t{0:s}'.format(alleles[1]))
-                                output_file.write('\t{0:.8g}'.format(maf))
-                                pvals=self.qrank.ComputePValues(dosage)
-                                for p in pvals[0]:
-                                    output_file.write('\t{0:.8g}'.format(p))
-                                output_file.write('\t{0:.8g}'.format(pvals[1]))
-                                output_file.write('\n')
+                    if (maf>=maf_cutoff):
+                        if (variant.alleles.index(variant.minor_allele)==1) and (maf<=0.5):
+                            alleles=variant.alleles
                         else:
-                            raise ValueError("Variant {0:s} is not biallelic".format(rsid))
-                    except ValueError:
-                        failed_list+=[rsid]
+                            alleles=variant.alleles[::-1]
+                            probs=probs[:,::-1]
 
-                    variant_counter+=1
-                    if (variant_counter) % print_freq==0:
-                        end=time.time()
-                        block_counter+=1
-                        elapsed=end-start
-                        print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                        print('Elapsed time {0:.2f} sec'.format(elapsed))
-                        avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                        print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                        start=time.time()
+                        dosage=probs[:,2]
+                        dosage=np.sum(probs[:,1:],axis=1)
 
-                print('Failed to process {0:d} variants due to missing ids/not biallelic'.format(len(failed_list)))
-                print('Failed rsids written to {0:s}.FailedSNPs.txt\n'.format(output_file_prefix))
-                with open(output_file_prefix+'.FailedSNPs.txt','w') as failed_file:
-                    failed_file.write('\n'.join(failed_list)+'\n')
+
+
+                        output_file.write('{0:s}'.format(variant.varid))
+                        output_file.write('\t{0:s}'.format(variant.rsid))
+                        output_file.write('\t{0:s}'.format(variant.chrom))
+                        output_file.write('\t{0:d}'.format(variant.pos))
+                        output_file.write('\t{0:s}'.format(alleles[0]))
+                        output_file.write('\t{0:s}'.format(alleles[1]))
+                        output_file.write('\t{0:.8g}'.format(maf))
+                        pvals=self.qrank.ComputePValues(dosage)
+                        for p in pvals[0]:
+                            output_file.write('\t{0:.8g}'.format(p))
+                        output_file.write('\t{0:.8g}'.format(pvals[1]))
+                        output_file.write('\n')
+                variant_counter+=1
+                if (variant_counter) % print_freq==0:
+                    end=time.time()
+                    block_counter+=1
+                    elapsed=end-start
+                    print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
+                    print('Elapsed time {0:.2f} sec'.format(elapsed))
+                    avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
+                    print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
+                    start=time.time()
+
 
     def PerformGWASRecssive(self,output_file_prefix,maf_cutoff,print_freq=1000,variant_list=None):
+        if variant_list is None:
+            total_num_variants=len(self.bgen_dataset)
+            variant_iterator=self.bgen_dataset
+        elif len(variant_list) > 1000:
+            print("Adjusting bgen index to drop excluded variants from the analysis. This may take several minutes up front.")
+            all_rsids=self.bgen_dataset.rsids()
+            rsid_table=pd.DataFrame({'rsid':all_rsids,'bgen_index':np.arange(len(all_rsids))})
+            rsid_table.set_index('rsid',inplace=True,drop=False)
+            rsid_table=rsid_table.drop(np.intersect1d(variant_list,rsid_table.index.to_numpy()))
+            self.bgen_dataset.drop_variants(rsid_table['bgen_index'].to_list())
 
-        with open(output_file_prefix+'.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
+            total_num_variants=len(self.bgen_dataset)
+            variant_iterator_func=lambda num_var: [(yield self.bgen_dataset[x]) for x in range(num_var)]
+            variant_iterator=variant_iterator_func(total_num_variants)
+        else:
+            # use a custom generator, load in real time
+            variant_iterator_func = lambda v_list: [(yield self.bgen_dataset.with_rsid(x)) for x in v_list]
+            variant_iterator=variant_iterator_func(variant_list)
+
+        with open(output_file_prefix+'.Additive.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
             output_file.write('snpid\trsid\tchrom\tpos\tmaj\tmin\tmaf\t')
             output_file.write('\t'.join(['p.{0:g}'.format(x) for x in self.qrank.quantiles])+'\tp.comp\n')
+
 
             variant_counter=0
             avg_elapsed_time=0.0
             block_counter=0
             start=time.time()
 
-            if variant_list is None:
-                total_num_variants=len(self.bgen_dataset)
-                for variant in self.bgen_dataset:
-                    if len(variant.alleles)==2:
-                        probs=variant.probabilities[self.included_subjects_bgen_idx]
-                        dosage=probs[:,2]
-                        maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(dosage.shape[0]*2)
+            for variant in variant_iterator:
+                if len(variant.alleles)==2:
+                    probs=variant.probabilities[self.included_subjects_bgen_idx]
+                    maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(probs.shape[0]*2)
 
-                        if (maf>=maf_cutoff):
-                            if variant.alleles.index(variant.minor_allele)!=1:
-                                alleles=variant.alleles[::-1]
-                            else:
-                                alleles=variant.alleles
-
-
-                            output_file.write('{0:s}'.format(variant.varid))
-                            output_file.write('\t{0:s}'.format(variant.rsid))
-                            output_file.write('\t{0:s}'.format(variant.chrom))
-                            output_file.write('\t{0:d}'.format(variant.pos))
-                            output_file.write('\t{0:s}'.format(alleles[0]))
-                            output_file.write('\t{0:s}'.format(alleles[1]))
-                            output_file.write('\t{0:.8g}'.format(maf))
-                            pvals=self.qrank.ComputePValues(dosage)
-                            for p in pvals[0]:
-                                output_file.write('\t{0:.8g}'.format(p))
-                            output_file.write('\t{0:.8g}'.format(pvals[1]))
-                            output_file.write('\n')
-                    variant_counter+=1
-                    if (variant_counter) % print_freq==0:
-                        end=time.time()
-                        block_counter+=1
-                        elapsed=end-start
-                        print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                        print('Elapsed time {0:.2f} sec'.format(elapsed))
-                        avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                        print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                        start=time.time()
-
-            else:
-                total_num_variants=len(variant_list)
-                failed_list=[]
-                for rsid in variant_list:
-                    try:
-                        variant=self.bgen_dataset.with_rsid(rsid)
-                        if len(variant.alleles)==2:
-                            probs=variant.probabilities[self.included_subjects_bgen_idx]
-                            dosage=probs[:,2]
-                            maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(dosage.shape[0]*2)
-
-                            if (maf>=maf_cutoff):
-                                if variant.alleles.index(variant.minor_allele)!=1:
-                                    alleles=variant.alleles[::-1]
-                                else:
-                                    alleles=variant.alleles
-
-
-                                output_file.write('{0:s}'.format(variant.varid))
-                                output_file.write('\t{0:s}'.format(variant.rsid))
-                                output_file.write('\t{0:s}'.format(variant.chrom))
-                                output_file.write('\t{0:d}'.format(variant.pos))
-                                output_file.write('\t{0:s}'.format(alleles[0]))
-                                output_file.write('\t{0:s}'.format(alleles[1]))
-                                output_file.write('\t{0:.8g}'.format(maf))
-                                pvals=self.qrank.ComputePValues(dosage)
-                                for p in pvals[0]:
-                                    output_file.write('\t{0:.8g}'.format(p))
-                                output_file.write('\t{0:.8g}'.format(pvals[1]))
-                                output_file.write('\n')
+                    if (maf>=maf_cutoff):
+                        if (variant.alleles.index(variant.minor_allele)==1) and (maf<=0.5):
+                            alleles=variant.alleles
                         else:
-                            raise ValueError("Variant {0:s} is not biallelic".format(rsid))
-                    except ValueError:
-                        failed_list+=[rsid]
+                            alleles=variant.alleles[::-1]
+                            probs=probs[:,::-1]
 
-                    variant_counter+=1
-                    if (variant_counter) % print_freq==0:
-                        end=time.time()
-                        block_counter+=1
-                        elapsed=end-start
-                        print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                        print('Elapsed time {0:.2f} sec'.format(elapsed))
-                        avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                        print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                        start=time.time()
+                        dosage=probs[:,2]
 
-                print('Failed to process {0:d} variants due to missing ids/not biallelic'.format(len(failed_list)))
-                print('Failed rsids written to {0:s}.FailedSNPs.txt\n'.format(output_file_prefix))
-                with open(output_file_prefix+'.FailedSNPs.txt','w') as failed_file:
-                    failed_file.write('\n'.join(failed_list)+'\n')
 
+                        output_file.write('{0:s}'.format(variant.varid))
+                        output_file.write('\t{0:s}'.format(variant.rsid))
+                        output_file.write('\t{0:s}'.format(variant.chrom))
+                        output_file.write('\t{0:d}'.format(variant.pos))
+                        output_file.write('\t{0:s}'.format(alleles[0]))
+                        output_file.write('\t{0:s}'.format(alleles[1]))
+                        output_file.write('\t{0:.8g}'.format(maf))
+                        pvals=self.qrank.ComputePValues(dosage)
+                        for p in pvals[0]:
+                            output_file.write('\t{0:.8g}'.format(p))
+                        output_file.write('\t{0:.8g}'.format(pvals[1]))
+                        output_file.write('\n')
+                variant_counter+=1
+                if (variant_counter) % print_freq==0:
+                    end=time.time()
+                    block_counter+=1
+                    elapsed=end-start
+                    print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
+                    print('Elapsed time {0:.2f} sec'.format(elapsed))
+                    avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
+                    print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
+                    start=time.time()
 
 if __name__=='__main__':
 
-    parser = argparse.ArgumentParser(description='Performs GWAS for quantitative phenotype using QRank method from Song et al. Bioinformatic 2017. Designed for use on UKBiobank')
+    parser = argparse.ArgumentParser(description='Performs GWAS for quantitative phenotype using QRank method from Song et al. Bioinformatics 2017. Designed for use on UKBiobank.')
     parser.add_argument("quantiles",help="Comma-sep list of quantiles for analysis. Recommended max: 3 quantiles.",type=str )
     parser.add_argument("phenotype_file_path",help="Specifies path to phentoype file. Expects tab-delimitted data WITH header. One column must contain subject ids.",type=str )
     parser.add_argument("phenotype_name",help="string value that provides column name of phenotype",type=str)
     parser.add_argument("subject_id_col",help="string value that provides column name of subject ids",type=str)
-    parser.add_argument("bgen_file_path",help="path to bgen file containing genotypes",type=str)
+    parser.add_argument("bgen_file_path",help="path to bgen file containing genotypes. Expects .bgi index file with same prefix as well.",type=str)
     parser.add_argument("output_prefix",help="prefix (including path) of output file",type=str)
     parser.add_argument("--covariate_file_path",help="Optional covariate file path. If not provided, then covariates (if given) will be read from phenotype file.",type=str)
     parser.add_argument("--sample_file_path",help="Path to .sample file for bgen dataset. If not provided, will search in path of .bgen file for .sample file with same prefix.",type=str)
@@ -457,8 +396,10 @@ if __name__=='__main__':
     parser.add_argument("--variant_subset",help="Text file containing rsids (not snpids, 1 per line, no header) for a set of variants to analyze. Note: this is effective only when analyzing subset of variants approximately 1/10th of total. Otherwise, likely faster to cycle through entire file.",type=str)
     parser.add_argument("--maf",help="Minor allele frequency to filter variants. Default is 0.0001.",type=float)
     parser.add_argument("--print_freq",help="Progress printing frequency. Default: Every 1000 variants.",type=int)
-    parser.add_argument("--null_model_tol",help="Tolerance for fitting null models. Default: 1e-6",type=float)
+    parser.add_argument("--model_param_tol",help="Tolerance for fitting regression models. Default: 1e-6",type=float)
     parser.add_argument("--genetic_model",help="Genetic model for GWAS. Must be in ['Additive','Recessive','Dominant']. Default: 'Additive'",type=str)
+    parser.add_argument("--null_model_only",help="Flag that indicates to program to to compute only the null models, and these output results (plus residuals) will be stored in the indicated directory. GWAS p-values will not be computed.",action="store_true")
+    parser.add_argument("--randomize",help="Flag that indicates that GWAS should be conducted over randomized rank scores. This is useful for calibrating null statistics for randomization test. Note, randomization occurs once and is NOT unique per variant.",action="store_true")
     args = parser.parse_args()
 
 
@@ -479,6 +420,7 @@ if __name__=='__main__':
     print('#'*20)
     print('Initiating QRankGWAS Analysis')
     print('Phenotype File: {0:s}'.format(phenotype_file_path))
+    print('Quantiles: {0:s}'.format(args.quantiles))
     print('Phenotype Name: {0:s}'.format(phenotype_name))
     print('Subject ID Column: {0:s}'.format(subject_id_col))
     print('bgen dataset: {0:s}'.format(bgen_file_path))
@@ -510,7 +452,7 @@ if __name__=='__main__':
         included_subjects=None
 
     if args.variant_subset is not None:
-        included_variants=pd.read_csv(args.variant_subset,sep='\t',header=None,names=['rsid'])
+        included_variants=pd.read_csv(args.variant_subset,sep='\t',header=None,names=['rsid'])['rsid'].values
         print("Subset of variant ids read from {0:s}.\n".format(args.variant_subset))
     else:
         included_variants=None
@@ -521,16 +463,21 @@ if __name__=='__main__':
     else:
         print_freq=1000
 
-    if args.null_model_tol is not None:
-        null_model_tol=args.print_freq
+    if args.model_param_tol is not None:
+        model_param_tol=args.print_freq
     else:
-        null_model_tol=1e-6
+        model_param_tol=1e-6
 
     if args.genetic_model is not None:
         assert args.genetic_model in ['Additive','Dominant','Recessive'],"Genetic model must be in ['Additive','Recessive','Dominant']"
         genetic_model=args.genetic_model
     else:
         genetic_model='Additive'
+
+    if args.randomize is True:
+        print('Randomization invoked. This will generate a null distribution of p-values.\n')
+
+
 
 
     print("Step 1: Reading bgen, phenotype, and covariate files.\n",flush=True)
@@ -539,24 +486,23 @@ if __name__=='__main__':
     print("Step 2: Constructing phenotype and covariate data arrays.\n",flush=True)
     gwas.ConstructDataArrays(phenotype_name,covariate_cols=covariate_list,included_subjects=included_subjects)
 
-    print("Step 3: Inferring Null Quantile Regression models.\n",flush=True)
-    gwas.BuildQRank(quantiles,output_prefix,param_tol=null_model_tol, max_fitting_iter=5000)
-    # #
-    print("Step 4: Performing GWAS using {0:s} genetic model. Will print update every {1:d} variants\n".format(genetic_model,print_freq),flush=True)
 
-    if genetic_model=='Dominant':
-        if included_variants is not None:
-            gwas.PerformGWASDominant(output_prefix,maf_cutoff=maf_cutoff,print_freq=print_freq,variant_list=included_variants['rsid'].values)
+    if args.null_model_only is False:
+        print("Step 3: Inferring Null Quantile Regression models.\n",flush=True)
+
+        gwas.BuildQRank(quantiles,param_tol=model_param_tol, max_fitting_iter=5000,randomize=args.randomize)
+
+        print("Step 4: Performing GWAS using {0:s} genetic model. Will print update every {1:d} variants\n".format(genetic_model,print_freq),flush=True)
+
+        if genetic_model=='Dominant':
+            gwas.PerformGWASDominant(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
+        elif genetic_model=='Recessive':
+            gwas.PerformGWASRecssive(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
         else:
-            gwas.PerformGWASDominant(output_prefix,maf_cutoff=maf_cutoff,print_freq=print_freq)
-    elif genetic_model=='Recessive':
-        if included_variants is not None:
-            gwas.PerformGWASRecssive(output_prefix,maf_cutoff=maf_cutoff,print_freq=print_freq,variant_list=included_variants['rsid'].values)
-        else:
-            gwas.PerformGWASRecssive(output_prefix,maf_cutoff=maf_cutoff,print_freq=print_freq)
+            gwas.PerformGWASAdditive(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
     else:
-        if included_variants is not None:
-            gwas.PerformGWASAdditive(output_prefix,maf_cutoff=maf_cutoff,print_freq=print_freq,variant_list=included_variants['rsid'].values)
-        else:
-            gwas.PerformGWASAdditive(output_prefix,maf_cutoff=maf_cutoff,print_freq=print_freq)
-    print("Successfully completed GWAS.\n",flush=True)
+        assert args.randomize is False,"Randomization has no effect on null model inference. Please remove this option if fitting null model only. "
+        print("Step 3: Inferring Null Quantile Regression models only. No GWAS will be performed.\n",flush=True)
+        gwas.BuildQRank(quantiles,param_tol=model_param_tol, max_fitting_iter=5000,output_file_prefix=output_prefix)
+
+    print("Analysis successfully completed!")

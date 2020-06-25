@@ -1,0 +1,6 @@
+README.md
+setup.py
+QRankGWAS_pkg_davidblair.egg-info/PKG-INFO
+QRankGWAS_pkg_davidblair.egg-info/SOURCES.txt
+QRankGWAS_pkg_davidblair.egg-info/dependency_links.txt
+QRankGWAS_pkg_davidblair.egg-info/top_level.txt
