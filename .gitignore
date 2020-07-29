@@ -1,2 +1,2 @@
-Debug*
-_*
+/Debug/**
+.DS_Store
