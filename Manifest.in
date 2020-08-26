@@ -1,0 +1,3 @@
+include tests/example_shell_script.sh
+include tests/R_QRankCompare.py
+include tests/test.py
