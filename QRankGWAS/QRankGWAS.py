@@ -1,14 +1,18 @@
-import numpy as np
 import os
-import pandas as pd
-import statsmodels.api as sm
-from sklearn.utils import shuffle
-from scipy.stats import chi2
-from bgen.reader import BgenFile
 import io
 import argparse
 import time
 import copy
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+from scipy.stats import chi2
+from sklearn.utils import shuffle
+from bgen.reader import BgenFile
+
+
+__version__ = "0.0.1"
+
 
 class QRank:
 
@@ -213,78 +217,6 @@ class QRankGWAS:
                             alleles=variant.alleles
                         else:
                             alleles=variant.alleles[::-1]
-                        
-
-
-                        output_file.write('{0:s}'.format(variant.varid))
-                        output_file.write('\t{0:s}'.format(variant.rsid))
-                        output_file.write('\t{0:s}'.format(variant.chrom))
-                        output_file.write('\t{0:d}'.format(variant.pos))
-                        output_file.write('\t{0:s}'.format(alleles[0]))
-                        output_file.write('\t{0:s}'.format(alleles[1]))
-                        output_file.write('\t{0:.8g}'.format(maf))
-                        pvals=self.qrank.ComputePValues(dosage)
-                        for p in pvals[0]:
-                            output_file.write('\t{0:.8g}'.format(p))
-                        output_file.write('\t{0:.8g}'.format(pvals[1]))
-                        output_file.write('\n')
-                variant_counter+=1
-                if (variant_counter) % print_freq==0:
-                    end=time.time()
-                    block_counter+=1
-                    elapsed=end-start
-                    print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                    print('Elapsed time {0:.2f} sec'.format(elapsed))
-                    avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                    print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                    start=time.time()
-
-
-    def PerformGWASDominant(self,output_file_prefix,maf_cutoff,print_freq=1000,variant_list=None):
-
-        if variant_list is None:
-            total_num_variants=len(self.bgen_dataset)
-            variant_iterator=self.bgen_dataset
-        elif len(variant_list) > 1000:
-            print("Adjusting bgen index to drop excluded variants from the analysis. This may take several minutes up front.")
-            all_rsids=self.bgen_dataset.rsids()
-            rsid_table=pd.DataFrame({'rsid':all_rsids,'bgen_index':np.arange(len(all_rsids))})
-            rsid_table.set_index('rsid',inplace=True,drop=False)
-            rsid_table=rsid_table.drop(np.intersect1d(variant_list,rsid_table.index.to_numpy()))
-            self.bgen_dataset.drop_variants(rsid_table['bgen_index'].to_list())
-
-            total_num_variants=len(self.bgen_dataset)
-            variant_iterator_func=lambda num_var: [(yield self.bgen_dataset[x]) for x in range(num_var)]
-            variant_iterator=variant_iterator_func(total_num_variants)
-        else:
-            # use a custom generator, load in real time
-            variant_iterator_func = lambda v_list: [(yield self.bgen_dataset.with_rsid(x)) for x in v_list]
-            variant_iterator=variant_iterator_func(variant_list)
-
-        with open(output_file_prefix+'.Additive.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
-            output_file.write('snpid\trsid\tchrom\tpos\tmaj\tmin\tmaf\t')
-            output_file.write('\t'.join(['p.{0:g}'.format(x) for x in self.qrank.quantiles])+'\tp.comp\n')
-
-
-            variant_counter=0
-            avg_elapsed_time=0.0
-            block_counter=0
-            start=time.time()
-
-            for variant in variant_iterator:
-                if len(variant.alleles)==2:
-                    probs=variant.probabilities[self.included_subjects_bgen_idx]
-                    maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(probs.shape[0]*2)
-
-                    if (maf>=maf_cutoff):
-                        if (variant.alleles.index(variant.minor_allele)==1) and (maf<=0.5):
-                            alleles=variant.alleles
-                        else:
-                            alleles=variant.alleles[::-1]
-                            probs=probs[:,::-1]
-
-                        dosage=probs[:,2]
-                        dosage=np.sum(probs[:,1:],axis=1)
 
 
 
@@ -312,76 +244,8 @@ class QRankGWAS:
                     start=time.time()
 
 
-    def PerformGWASRecssive(self,output_file_prefix,maf_cutoff,print_freq=1000,variant_list=None):
-        if variant_list is None:
-            total_num_variants=len(self.bgen_dataset)
-            variant_iterator=self.bgen_dataset
-        elif len(variant_list) > 1000:
-            print("Adjusting bgen index to drop excluded variants from the analysis. This may take several minutes up front.")
-            all_rsids=self.bgen_dataset.rsids()
-            rsid_table=pd.DataFrame({'rsid':all_rsids,'bgen_index':np.arange(len(all_rsids))})
-            rsid_table.set_index('rsid',inplace=True,drop=False)
-            rsid_table=rsid_table.drop(np.intersect1d(variant_list,rsid_table.index.to_numpy()))
-            self.bgen_dataset.drop_variants(rsid_table['bgen_index'].to_list())
 
-            total_num_variants=len(self.bgen_dataset)
-            variant_iterator_func=lambda num_var: [(yield self.bgen_dataset[x]) for x in range(num_var)]
-            variant_iterator=variant_iterator_func(total_num_variants)
-        else:
-            # use a custom generator, load in real time
-            variant_iterator_func = lambda v_list: [(yield self.bgen_dataset.with_rsid(x)) for x in v_list]
-            variant_iterator=variant_iterator_func(variant_list)
-
-        with open(output_file_prefix+'.Additive.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
-            output_file.write('snpid\trsid\tchrom\tpos\tmaj\tmin\tmaf\t')
-            output_file.write('\t'.join(['p.{0:g}'.format(x) for x in self.qrank.quantiles])+'\tp.comp\n')
-
-
-            variant_counter=0
-            avg_elapsed_time=0.0
-            block_counter=0
-            start=time.time()
-
-            for variant in variant_iterator:
-                if len(variant.alleles)==2:
-                    probs=variant.probabilities[self.included_subjects_bgen_idx]
-                    maf=variant.minor_allele_dosage[self.included_subjects_bgen_idx].sum()/(probs.shape[0]*2)
-
-                    if (maf>=maf_cutoff):
-                        if (variant.alleles.index(variant.minor_allele)==1) and (maf<=0.5):
-                            alleles=variant.alleles
-                        else:
-                            alleles=variant.alleles[::-1]
-                            probs=probs[:,::-1]
-
-                        dosage=probs[:,2]
-
-
-                        output_file.write('{0:s}'.format(variant.varid))
-                        output_file.write('\t{0:s}'.format(variant.rsid))
-                        output_file.write('\t{0:s}'.format(variant.chrom))
-                        output_file.write('\t{0:d}'.format(variant.pos))
-                        output_file.write('\t{0:s}'.format(alleles[0]))
-                        output_file.write('\t{0:s}'.format(alleles[1]))
-                        output_file.write('\t{0:.8g}'.format(maf))
-                        pvals=self.qrank.ComputePValues(dosage)
-                        for p in pvals[0]:
-                            output_file.write('\t{0:.8g}'.format(p))
-                        output_file.write('\t{0:.8g}'.format(pvals[1]))
-                        output_file.write('\n')
-                variant_counter+=1
-                if (variant_counter) % print_freq==0:
-                    end=time.time()
-                    block_counter+=1
-                    elapsed=end-start
-                    print('Processed {0:d} of {1:d} variants ({2:.1f}% of total)'.format(variant_counter,total_num_variants,round((variant_counter/total_num_variants)*1000.0)/10.0),flush=True)
-                    print('Elapsed time {0:.2f} sec'.format(elapsed))
-                    avg_elapsed_time = ((avg_elapsed_time*(block_counter-1)+elapsed)/block_counter)
-                    print('Estimated Total Time Required: {0:.2f} hours\n'.format(((total_num_variants/print_freq)*avg_elapsed_time)/3600))
-                    start=time.time()
-
-if __name__=='__main__':
-
+def main():
     parser = argparse.ArgumentParser(description='Performs GWAS for quantitative phenotype using QRank method from Song et al. Bioinformatics 2017. Designed for use on UKBiobank.')
     parser.add_argument("quantiles",help="Comma-sep list of quantiles for analysis. Recommended max: 3 quantiles.",type=str )
     parser.add_argument("phenotype_file_path",help="Specifies path to phentoype file. Expects tab-delimitted data WITH header. One column must contain subject ids.",type=str )
@@ -391,14 +255,13 @@ if __name__=='__main__':
     parser.add_argument("output_prefix",help="prefix (including path) of output file",type=str)
     parser.add_argument("--covariate_file_path",help="Optional covariate file path. If not provided, then covariates (if given) will be read from phenotype file.",type=str)
     parser.add_argument("--sample_file_path",help="Path to .sample file for bgen dataset. If not provided, will search in path of .bgen file for .sample file with same prefix.",type=str)
-    parser.add_argument("--covariate_list",help="List of covariates to include into the model. Provided as comma-sep list (no spaces)",type=str)
+    parser.add_argument("--covariate_list",help="List of covariates to include into the model. Provided as comma-sep list (no spaces). DO NOT include intercept; this automatically included.",type=str)
     parser.add_argument("--subject_subset",help="Text file containing subject ids to include into the analysis. Header with subject id must be present. Single column expected, but can contain other columns as well (tab-delimitted).",type=str)
     parser.add_argument("--variant_subset",help="Text file containing rsids (not snpids, 1 per line, no header) for a set of variants to analyze. Note: this is effective only when analyzing subset of variants approximately 1/10th of total. Otherwise, likely faster to cycle through entire file.",type=str)
     parser.add_argument("--maf",help="Minor allele frequency to filter variants. Default is 0.0001.",type=float)
     parser.add_argument("--print_freq",help="Progress printing frequency. Default: Every 1000 variants.",type=int)
     parser.add_argument("--model_param_tol",help="Tolerance for fitting regression models. Default: 1e-6",type=float)
-    parser.add_argument("--genetic_model",help="Genetic model for GWAS. Must be in ['Additive','Recessive','Dominant']. Default: 'Additive'",type=str)
-    parser.add_argument("--null_model_only",help="Flag that indicates to program to to compute only the null models, and these output results (plus residuals) will be stored in the indicated directory. GWAS p-values will not be computed.",action="store_true")
+    parser.add_argument("--null_model_only",help="Flag that indicates the program  to compute only the null models, and these output results (plus residuals) will be stored in the indicated directory. GWAS p-values will not be computed.",action="store_true")
     parser.add_argument("--randomize",help="Flag that indicates that GWAS should be conducted over randomized rank scores. This is useful for calibrating null statistics for randomization test. Note, randomization occurs once and is NOT unique per variant.",action="store_true")
     args = parser.parse_args()
 
@@ -468,17 +331,9 @@ if __name__=='__main__':
     else:
         model_param_tol=1e-6
 
-    if args.genetic_model is not None:
-        assert args.genetic_model in ['Additive','Dominant','Recessive'],"Genetic model must be in ['Additive','Recessive','Dominant']"
-        genetic_model=args.genetic_model
-    else:
-        genetic_model='Additive'
 
     if args.randomize is True:
         print('Randomization invoked. This will generate a null distribution of p-values.\n')
-
-
-
 
     print("Step 1: Reading bgen, phenotype, and covariate files.\n",flush=True)
     gwas=QRankGWAS(bgen_file_path,phenotype_file_path,subject_id_col,covariate_file_path=covariate_file_path)
@@ -492,14 +347,11 @@ if __name__=='__main__':
 
         gwas.BuildQRank(quantiles,param_tol=model_param_tol, max_fitting_iter=5000,randomize=args.randomize)
 
-        print("Step 4: Performing GWAS using {0:s} genetic model. Will print update every {1:d} variants\n".format(genetic_model,print_freq),flush=True)
+        print("Step 4: Performing GWAS using additive genetic model. Will print update every {0:d} variants\n".format(print_freq),flush=True)
 
-        if genetic_model=='Dominant':
-            gwas.PerformGWASDominant(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
-        elif genetic_model=='Recessive':
-            gwas.PerformGWASRecssive(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
-        else:
-            gwas.PerformGWASAdditive(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
+
+
+        gwas.PerformGWASAdditive(output_prefix,maf_cutoff,print_freq=print_freq,variant_list=included_variants)
     else:
         assert args.randomize is False,"Randomization has no effect on null model inference. Please remove this option if fitting null model only. "
         print("Step 3: Inferring Null Quantile Regression models only. No GWAS will be performed.\n",flush=True)
