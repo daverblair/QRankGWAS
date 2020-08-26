@@ -1,5 +1,5 @@
 """
-This code compare R and Python implementations directly. It was used for debugging. 
+This code compare R and Python implementations directly. It was used for debugging.
 
 """
 
@@ -7,7 +7,6 @@ This code compare R and Python implementations directly. It was used for debuggi
 
 if __name__=='__main__':
     import sys
-    sys.path.append("../QRankGWAS")
     from QRankGWAS import QRank
     import numpy as np
     import pandas as pd
@@ -15,6 +14,7 @@ if __name__=='__main__':
 
     N=10000
 
+    np.random.seed(123)
     intercept=-0.5
     p=0.05
     q=1.0-p
@@ -43,19 +43,6 @@ if __name__=='__main__':
     qrank.FitNullModels(tol=1e-8)
     p=qrank.ComputePValues(dosage)
     betas,ci=qrank.FitAltModels(dosage_df)
-    # #
-    #
-    from rpy2.robjects.packages import importr
-    from rpy2.robjects import numpy2ri
-    numpy2ri.activate()
-    qrank_r=importr("QRank")
-    r_output=qrank_r.QRank(Y,dosage,Z,quants)
 
-    print("Python Rank P's: {0:g},{1:g},{2:g}".format(*p[0]))
-    print("Python Composite P: {0:g}".format(p[1]))
-
-    print("R QRank P's: {0:g},{1:g},{2:g}".format(*np.array(r_output[1])))
-    print("R Composite P: {0:g}".format(np.array(r_output[0][0])))
-
-    print("Quantile Effect Params: {0:g},{1:g},{2:g}".format(*betas))
-    print("Quantile Effects 95CI: ({0:s}),({1:s}),({2:s})".format(*[','.join(list(np.array(x,dtype=np.str))) for x in ci]))
+    print("Rank P's: {0:g},{1:g},{2:g}".format(*p[0]))
+    print("Composite P: {0:g}".format(p[1]))
