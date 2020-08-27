@@ -35,14 +35,14 @@ setuptools.setup(
         "console_scripts": ['QRankGWAS = QRankGWAS.QRankGWAS:main']
         },
     install_requires=[
-        'argparse==1.1',
-        'numpy==1.19.1',
-        'pandas==1.0.5',
-        'statsmodels==0.11.1',
-        'scipy==1.5.2',
-        'sklearn==0.23.1'
+        'argparse>=1.1',
+        'numpy>=1.19.0',
+        'pandas>=1.0.5',
+        'statsmodels>=0.11.1',
+        'scipy>=1.5.2',
+        'scikit-learn>=0.23.1',
         'bgen==1.2.7'
-    ],
+        ],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

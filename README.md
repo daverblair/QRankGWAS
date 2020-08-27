@@ -3,8 +3,7 @@
 
 Installation:
 
-
-Use:
+pip install QRankGWAS
 
 Following installation, specific details regarding the software can be found by running the following command:
 
