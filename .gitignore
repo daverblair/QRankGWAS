@@ -1,7 +1,7 @@
 **/tests/Debug
 **/.DS_Store
 **/__pycache__
-.DS_Store
+/.DS_Store
 .gitattributes
 .gitignore
 /build
