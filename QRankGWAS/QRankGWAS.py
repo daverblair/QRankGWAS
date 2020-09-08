@@ -11,7 +11,7 @@ from sklearn.utils import shuffle
 from bgen.reader import BgenFile
 
 
-__version__ = "0.0.5"
+__version__ = "0.0.7"
 
 
 class QRank:
@@ -190,11 +190,18 @@ class QRankGWAS:
             self.bgen_dataset.drop_variants(rsid_table['bgen_index'].to_list())
 
             total_num_variants=len(self.bgen_dataset)
-            variant_iterator_func=lambda num_var: [(yield self.bgen_dataset[x]) for x in range(num_var)]
+            def variant_iterator_func(num_var):
+                for x in range(num_var):
+                    yield self.bgen_dataset[x]
+
             variant_iterator=variant_iterator_func(total_num_variants)
         else:
             # use a custom generator, load in real time
-            variant_iterator_func = lambda v_list: [(yield self.bgen_dataset.with_rsid(x)) for x in v_list]
+            #
+            def variant_iterator_func(v_list):
+                for x in v_list:
+                    yield self.bgen_dataset.with_rsid(x)
+
             variant_iterator=variant_iterator_func(variant_list)
 
         with open(output_file_prefix+'.Additive.QRankGWAS.txt','w',buffering=io.DEFAULT_BUFFER_SIZE*10) as output_file:
