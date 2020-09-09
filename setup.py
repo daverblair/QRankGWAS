@@ -14,8 +14,7 @@ import re
 version = re.search(
     '^__version__\s*=\s*"(.*)"',
     open('QRankGWAS/QRankGWAS.py').read(),
-    re.M
-    ).group(1)
+    re.M).group(1)
 
 
 with open("README.md", "r") as fh:
@@ -40,7 +39,7 @@ setuptools.setup(
         'pandas>=1.0.5',
         'statsmodels>=0.11.1',
         'scipy>=1.5.2',
-        'scikit-learn>=0.23.1',
+        'scikit-learn>=0.22.1',
         'bgen==1.2.7'
         ],
     classifiers=[
