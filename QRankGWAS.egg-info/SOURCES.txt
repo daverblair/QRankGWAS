@@ -1,0 +1,15 @@
+MANIFEST.in
+README.md
+setup.py
+QRankGWAS/QRankGWAS.py
+QRankGWAS/__init__.py
+QRankGWAS/__main__.py
+QRankGWAS.egg-info/PKG-INFO
+QRankGWAS.egg-info/SOURCES.txt
+QRankGWAS.egg-info/dependency_links.txt
+QRankGWAS.egg-info/entry_points.txt
+QRankGWAS.egg-info/requires.txt
+QRankGWAS.egg-info/top_level.txt
+tests/R_QRankCompare.py
+tests/example_shell_script.sh
+tests/test.py

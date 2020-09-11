@@ -1,0 +1,3 @@
+[console_scripts]
+QRankGWAS = QRankGWAS.QRankGWAS:main
+

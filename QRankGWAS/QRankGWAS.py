@@ -11,7 +11,7 @@ from sklearn.utils import shuffle
 from bgen.reader import BgenFile
 
 
-__version__ = "0.0.7"
+__version__ = "0.0.8"
 
 
 class QRank:
