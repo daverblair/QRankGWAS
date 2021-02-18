@@ -334,7 +334,7 @@ def main():
         print_freq=1000
 
     if args.model_param_tol is not None:
-        model_param_tol=args.print_freq
+        model_param_tol=args.model_param_tol
     else:
         model_param_tol=1e-6
 
