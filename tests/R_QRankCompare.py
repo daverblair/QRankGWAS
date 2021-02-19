@@ -13,7 +13,7 @@ if __name__=='__main__':
     import pandas as pd
 
 
-    N=10000
+    N=100000
 
     intercept=-0.5
     p=0.05
@@ -32,7 +32,7 @@ if __name__=='__main__':
     pheno=pd.DataFrame({'phenotype':Y.ravel()},index=np.arange(Y.shape[0]))
     covariates=pd.DataFrame({'sex':Z[:,0],'age':Z[:,1]},index=np.arange(Y.shape[0]))
 
-    quants=np.array([0.9,0.95,0.99])
+    quants=np.array([0.99,0.995,0.999])
 
     dosage=np.sum(X*np.arange(3),axis=1)
 
@@ -40,7 +40,7 @@ if __name__=='__main__':
     dosage_df['Minor Allele Dosage']=dosage
 
     qrank=QRank(pheno,covariate_matrix=covariates,quantiles=quants)
-    qrank.FitNullModels(tol=1e-8)
+    qrank.FitNullModels(tol=1e-12)
     p=qrank.ComputePValues(dosage)
     betas,ci=qrank.FitAltModels(dosage_df)
     # #

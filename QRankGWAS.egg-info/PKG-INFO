@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: QRankGWAS
-Version: 0.0.8
+Version: 0.0.9
 Summary: Python implementation of the QRank method described in Song et al Bioninformatics 2017.
 Home-page: https://github.com/daverblair/QRankGWAS
 Author: David Blair
